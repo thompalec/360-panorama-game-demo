@@ -1,0 +1,603 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>360° Panoramic Game Demo</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        #info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: white;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 14px;
+            pointer-events: none;
+            z-index: 100;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">
+        Controls: WASD to move | Mouse/Touch to look around<br>
+        FPS: <span id="fps">0</span>
+    </div>
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js"
+            }
+        }
+    </script>
+    <script type="module">
+        import * as THREE from 'three';
+
+        // ========================================
+        // Shader Definitions
+        // ========================================
+
+        // Vertex shader for cylindrical projection
+        const cylinderVertexShader = `
+            varying vec2 vUv;
+            void main() {
+                vUv = uv;
+                gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+        `;
+
+        // Fragment shader for cylindrical cubemap projection
+        const cylinderFragmentShader = `
+            uniform samplerCube cubemap;
+            varying vec2 vUv;
+
+            void main() {
+                // Convert horizontal UV (0-1) to angle around Y axis (0-2π)
+                float angle = vUv.x * 2.0 * 3.14159265359;
+
+                // Convert vertical UV to elevation angle
+                // Map from 0-1 to a limited vertical range to avoid pole distortion
+                float verticalAngle = (vUv.y - 0.5) * 0.8; // ±0.4 range, flattened
+
+                // Create direction vector for sampling cubemap
+                vec3 direction = vec3(
+                    sin(angle),
+                    verticalAngle,
+                    cos(angle)
+                );
+
+                direction = normalize(direction);
+
+                // Sample the cubemap
+                vec4 color = textureCube(cubemap, direction);
+
+                gl_FragColor = color;
+            }
+        `;
+
+        // ========================================
+        // Scene Setup
+        // ========================================
+
+        let camera, topCamera, cubeCamera, scene, renderer;
+        let cubeRenderTarget;
+        let cylinderMesh, cylinderScene, cylinderCamera;
+        let player = {
+            position: new THREE.Vector3(0, 1.6, 0),
+            rotation: { yaw: 0, pitch: 0 },
+            velocity: new THREE.Vector3()
+        };
+
+        let keys = {};
+        let mouse = { x: 0, y: 0, deltaX: 0, deltaY: 0, down: false };
+        let lastFrameTime = performance.now();
+        let frameCount = 0;
+        let lastFpsUpdate = performance.now();
+
+        function initScene() {
+            // Renderer setup
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.autoClear = false; // We'll manually clear for dual viewport
+            document.body.appendChild(renderer.domElement);
+
+            // Main scene
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87ceeb); // Sky blue
+            scene.fog = new THREE.Fog(0x87ceeb, 20, 50);
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(10, 20, 10);
+            directionalLight.castShadow = true;
+            scene.add(directionalLight);
+
+            // Ground plane
+            const groundGeometry = new THREE.PlaneGeometry(50, 50);
+            const groundMaterial = new THREE.MeshStandardMaterial({
+                color: 0x3a8c3a,
+                roughness: 0.8,
+                metalness: 0.2
+            });
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            // Add 4 specific test objects for easy identification
+            const cubeGeometry = new THREE.BoxGeometry(1.5, 1.5, 1.5);
+            const sphereGeometry = new THREE.SphereGeometry(0.75, 32, 32);
+
+            // Green cube in FRONT (negative Z from player start position)
+            const greenCube = new THREE.Mesh(cubeGeometry, new THREE.MeshStandardMaterial({
+                color: 0x00ff00,
+                roughness: 0.5,
+                metalness: 0.3
+            }));
+            greenCube.position.set(0, 0.75, -3);
+            greenCube.castShadow = true;
+            scene.add(greenCube);
+
+            // Purple sphere to the LEFT (negative X)
+            const purpleSphere = new THREE.Mesh(sphereGeometry, new THREE.MeshStandardMaterial({
+                color: 0x9900ff,
+                roughness: 0.5,
+                metalness: 0.3
+            }));
+            purpleSphere.position.set(-3, 0.75, 0);
+            purpleSphere.castShadow = true;
+            scene.add(purpleSphere);
+
+            // Yellow cube to the RIGHT (positive X)
+            const yellowCube = new THREE.Mesh(cubeGeometry, new THREE.MeshStandardMaterial({
+                color: 0xffff00,
+                roughness: 0.5,
+                metalness: 0.3
+            }));
+            yellowCube.position.set(3, 0.75, 0);
+            yellowCube.castShadow = true;
+            scene.add(yellowCube);
+
+            // Red cube BEHIND (positive Z from player start position)
+            const redCube = new THREE.Mesh(cubeGeometry, new THREE.MeshStandardMaterial({
+                color: 0xff0000,
+                roughness: 0.5,
+                metalness: 0.3
+            }));
+            redCube.position.set(0, 0.75, 3);
+            redCube.castShadow = true;
+            scene.add(redCube);
+
+            // Add random objects to populate the scene
+            const colors = [
+                0xff6b6b, 0x4ecdc4, 0x45b7d1, 0xf7b731, 0x5f27cd,
+                0x00d2d3, 0xff9ff3, 0xfeca57, 0x48dbfb, 0xff6348,
+                0x1dd1a1, 0xee5a6f, 0xc44569, 0x786fa6, 0xf8a5c2
+            ];
+
+            // Random spheres
+            for (let i = 0; i < 30; i++) {
+                const size = Math.random() * 0.5 + 0.3;
+                const geo = new THREE.SphereGeometry(size, 16, 16);
+                const mat = new THREE.MeshStandardMaterial({
+                    color: colors[Math.floor(Math.random() * colors.length)],
+                    roughness: Math.random() * 0.5 + 0.3,
+                    metalness: Math.random() * 0.7
+                });
+                const sphere = new THREE.Mesh(geo, mat);
+                sphere.position.set(
+                    (Math.random() - 0.5) * 30,
+                    size,
+                    (Math.random() - 0.5) * 30
+                );
+                sphere.castShadow = true;
+                scene.add(sphere);
+            }
+
+            // Random cubes
+            for (let i = 0; i < 25; i++) {
+                const size = Math.random() * 1.2 + 0.5;
+                const geo = new THREE.BoxGeometry(size, size, size);
+                const mat = new THREE.MeshStandardMaterial({
+                    color: colors[Math.floor(Math.random() * colors.length)],
+                    roughness: Math.random() * 0.6 + 0.2,
+                    metalness: Math.random() * 0.5
+                });
+                const cube = new THREE.Mesh(geo, mat);
+                cube.position.set(
+                    (Math.random() - 0.5) * 30,
+                    size / 2,
+                    (Math.random() - 0.5) * 30
+                );
+                cube.rotation.y = Math.random() * Math.PI * 2;
+                cube.castShadow = true;
+                scene.add(cube);
+            }
+
+            // Random cylinders
+            for (let i = 0; i < 15; i++) {
+                const radius = Math.random() * 0.4 + 0.2;
+                const height = Math.random() * 2 + 0.5;
+                const geo = new THREE.CylinderGeometry(radius, radius, height, 16);
+                const mat = new THREE.MeshStandardMaterial({
+                    color: colors[Math.floor(Math.random() * colors.length)],
+                    roughness: Math.random() * 0.5 + 0.3,
+                    metalness: Math.random() * 0.6
+                });
+                const cylinder = new THREE.Mesh(geo, mat);
+                cylinder.position.set(
+                    (Math.random() - 0.5) * 30,
+                    height / 2,
+                    (Math.random() - 0.5) * 30
+                );
+                cylinder.castShadow = true;
+                scene.add(cylinder);
+            }
+
+            // Random cones
+            for (let i = 0; i < 12; i++) {
+                const radius = Math.random() * 0.6 + 0.3;
+                const height = Math.random() * 1.5 + 0.8;
+                const geo = new THREE.ConeGeometry(radius, height, 8);
+                const mat = new THREE.MeshStandardMaterial({
+                    color: colors[Math.floor(Math.random() * colors.length)],
+                    roughness: Math.random() * 0.5 + 0.2,
+                    metalness: Math.random() * 0.8
+                });
+                const cone = new THREE.Mesh(geo, mat);
+                cone.position.set(
+                    (Math.random() - 0.5) * 30,
+                    height / 2,
+                    (Math.random() - 0.5) * 30
+                );
+                cone.castShadow = true;
+                scene.add(cone);
+            }
+
+            // Random torus (donut shapes)
+            for (let i = 0; i < 8; i++) {
+                const geo = new THREE.TorusGeometry(0.5, 0.2, 8, 16);
+                const mat = new THREE.MeshStandardMaterial({
+                    color: colors[Math.floor(Math.random() * colors.length)],
+                    roughness: Math.random() * 0.4 + 0.3,
+                    metalness: Math.random() * 0.9
+                });
+                const torus = new THREE.Mesh(geo, mat);
+                torus.position.set(
+                    (Math.random() - 0.5) * 30,
+                    Math.random() * 2 + 0.5,
+                    (Math.random() - 0.5) * 30
+                );
+                torus.rotation.x = Math.random() * Math.PI;
+                torus.rotation.z = Math.random() * Math.PI;
+                torus.castShadow = true;
+                scene.add(torus);
+            }
+
+            // Top viewport camera (standard first-person view)
+            topCamera = new THREE.PerspectiveCamera(
+                75, // FOV
+                window.innerWidth / (window.innerHeight / 2), // Aspect ratio for half viewport
+                0.1,
+                100
+            );
+
+            // Cubemap render target for 360° capture
+            cubeRenderTarget = new THREE.WebGLCubeRenderTarget(512, {
+                format: THREE.RGBAFormat,
+                generateMipmaps: true,
+                minFilter: THREE.LinearMipmapLinearFilter
+            });
+
+            // Cube camera for omnidirectional rendering
+            cubeCamera = new THREE.CubeCamera(0.1, 100, cubeRenderTarget);
+
+            // Cylinder scene and camera for panorama display
+            cylinderScene = new THREE.Scene();
+            cylinderCamera = new THREE.OrthographicCamera(-4, 4, 1, -1, 0.1, 10);
+            cylinderCamera.position.z = 1;
+
+            // Panorama plane - wide aspect ratio for 360° view
+            const debugGeometry = new THREE.PlaneGeometry(8, 2);
+
+            // Debug shader to visualize cubemap
+            const debugVertexShader = `
+                varying vec2 vUv;
+                void main() {
+                    vUv = uv;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `;
+
+            const debugFragmentShader = `
+                uniform samplerCube cubemap;
+                uniform float playerYaw;
+                varying vec2 vUv;
+
+                void main() {
+                    // Cylindrical projection: warp cubemap into seamless 360° panorama
+
+                    // Convert horizontal UV (0-1) to angle around Y axis (0 to 2π)
+                    // Add player yaw to rotate panorama with player's view
+                    float angle = (1.0 - vUv.x) * 2.0 * 3.14159265359 + playerYaw; // Flipped horizontally + yaw rotation
+
+                    // Convert vertical UV to elevation
+                    // Map from 0-1 to a limited vertical range to avoid pole distortion
+                    float verticalAngle = (vUv.y - 0.5) * 1.2; // Adjust range for better coverage
+
+                    // Create direction vector for sampling cubemap
+                    // This creates a cylinder around the Y axis
+                    vec3 direction = vec3(
+                        sin(angle),           // X component varies with angle
+                        verticalAngle,        // Y component for vertical look
+                        cos(angle)            // Z component varies with angle
+                    );
+
+                    direction = normalize(direction);
+
+                    // Sample the cubemap at this direction
+                    vec4 color = textureCube(cubemap, direction);
+
+                    // Brighten the output to match the top viewport
+                    color.rgb *= 2.0;
+
+                    gl_FragColor = color;
+                }
+            `;
+
+            const debugMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    cubemap: { value: cubeRenderTarget.texture },
+                    playerYaw: { value: 0.0 }
+                },
+                vertexShader: debugVertexShader,
+                fragmentShader: debugFragmentShader
+            });
+
+            cylinderMesh = new THREE.Mesh(debugGeometry, debugMaterial);
+            cylinderScene.add(cylinderMesh);
+        }
+
+        // ========================================
+        // Input Handling
+        // ========================================
+
+        function initInput() {
+            // Keyboard input
+            window.addEventListener('keydown', (e) => {
+                keys[e.code] = true;
+            });
+
+            window.addEventListener('keyup', (e) => {
+                keys[e.code] = false;
+            });
+
+            // Mouse input
+            renderer.domElement.addEventListener('mousedown', (e) => {
+                mouse.down = true;
+                renderer.domElement.requestPointerLock();
+            });
+
+            renderer.domElement.addEventListener('mouseup', () => {
+                mouse.down = false;
+            });
+
+            renderer.domElement.addEventListener('mousemove', (e) => {
+                if (document.pointerLockElement === renderer.domElement) {
+                    mouse.deltaX = e.movementX || 0;
+                    mouse.deltaY = e.movementY || 0;
+                }
+            });
+
+            // Touch input
+            let lastTouchX = 0;
+            let lastTouchY = 0;
+
+            renderer.domElement.addEventListener('touchstart', (e) => {
+                if (e.touches.length > 0) {
+                    lastTouchX = e.touches[0].clientX;
+                    lastTouchY = e.touches[0].clientY;
+                    mouse.down = true;
+                }
+            });
+
+            renderer.domElement.addEventListener('touchmove', (e) => {
+                e.preventDefault();
+                if (e.touches.length > 0) {
+                    const touch = e.touches[0];
+                    mouse.deltaX = (touch.clientX - lastTouchX) * 0.5;
+                    mouse.deltaY = (touch.clientY - lastTouchY) * 0.5;
+                    lastTouchX = touch.clientX;
+                    lastTouchY = touch.clientY;
+                }
+            });
+
+            renderer.domElement.addEventListener('touchend', () => {
+                mouse.down = false;
+                mouse.deltaX = 0;
+                mouse.deltaY = 0;
+            });
+
+            // Prevent context menu on right click
+            renderer.domElement.addEventListener('contextmenu', (e) => {
+                e.preventDefault();
+            });
+
+            // Handle window resize
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        function onWindowResize() {
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+
+            renderer.setSize(width, height);
+
+            // Update top camera aspect ratio (for half viewport)
+            topCamera.aspect = width / (height / 2);
+            topCamera.updateProjectionMatrix();
+
+            // Update cylinder camera for bottom viewport
+            const aspect = width / (height / 2);
+            // Show full panorama width (8 units = -4 to 4)
+            const horizontalSize = 4;
+            // Adjust vertical to maintain aspect ratio
+            const verticalSize = horizontalSize / aspect;
+
+            cylinderCamera.left = -horizontalSize;
+            cylinderCamera.right = horizontalSize;
+            cylinderCamera.top = verticalSize;
+            cylinderCamera.bottom = -verticalSize;
+            cylinderCamera.updateProjectionMatrix();
+        }
+
+        // ========================================
+        // Update Logic
+        // ========================================
+
+        function updatePlayer(deltaTime) {
+            const moveSpeed = 5.0 * deltaTime;
+            const lookSensitivity = 0.002;
+
+            // Update rotation from mouse/touch input
+            player.rotation.yaw -= mouse.deltaX * lookSensitivity;
+            player.rotation.pitch -= mouse.deltaY * lookSensitivity;
+
+            // Clamp pitch to prevent camera flip
+            player.rotation.pitch = Math.max(-Math.PI / 2.5, Math.min(Math.PI / 2.5, player.rotation.pitch));
+
+            // Reset mouse delta
+            mouse.deltaX = 0;
+            mouse.deltaY = 0;
+
+            // Calculate forward and right vectors based on yaw
+            const forward = new THREE.Vector3(
+                Math.sin(player.rotation.yaw),
+                0,
+                -Math.cos(player.rotation.yaw)
+            );
+            const right = new THREE.Vector3(
+                Math.sin(player.rotation.yaw + Math.PI / 2),
+                0,
+                -Math.cos(player.rotation.yaw + Math.PI / 2)
+            );
+
+            // WASD movement
+            player.velocity.set(0, 0, 0);
+
+            if (keys['KeyW']) {
+                player.velocity.add(forward);
+            }
+            if (keys['KeyS']) {
+                player.velocity.sub(forward);
+            }
+            if (keys['KeyA']) {
+                player.velocity.sub(right);
+            }
+            if (keys['KeyD']) {
+                player.velocity.add(right);
+            }
+
+            // Normalize and apply movement
+            if (player.velocity.length() > 0) {
+                player.velocity.normalize();
+                player.position.add(player.velocity.multiplyScalar(moveSpeed));
+            }
+
+            // Update top camera
+            topCamera.position.copy(player.position);
+            topCamera.rotation.order = 'YXZ';
+            topCamera.rotation.y = player.rotation.yaw;
+            //topCamera.rotation.x = player.rotation.pitch;
+
+            // Update cube camera position
+            cubeCamera.position.copy(player.position);
+        }
+
+        // ========================================
+        // Render Loop
+        // ========================================
+
+        let framesSinceLastCubemapUpdate = 0;
+        const cubemapUpdateInterval = 2; // Update cubemap every N frames for performance
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Calculate delta time
+            const currentTime = performance.now();
+            const deltaTime = (currentTime - lastFrameTime) / 1000;
+            lastFrameTime = currentTime;
+
+            // Update FPS counter
+            frameCount++;
+            if (currentTime - lastFpsUpdate >= 1000) {
+                document.getElementById('fps').textContent = frameCount;
+                frameCount = 0;
+                lastFpsUpdate = currentTime;
+            }
+
+            // Update player and cameras
+            updatePlayer(deltaTime);
+
+            // Update cubemap (not every frame for performance)
+            if (framesSinceLastCubemapUpdate >= cubemapUpdateInterval) {
+                cubeCamera.update(renderer, scene);
+                framesSinceLastCubemapUpdate = 0;
+            }
+            framesSinceLastCubemapUpdate++;
+
+            // Clear the entire canvas
+            renderer.clear();
+
+            // ===== TOP VIEWPORT: Standard first-person view =====
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            const halfHeight = Math.floor(height / 2);
+            const overlap = 10; // Small overlap to prevent flickering line
+
+            renderer.setViewport(0, halfHeight, width, height - halfHeight);
+            renderer.setScissor(0, halfHeight, width, height - halfHeight);
+            renderer.setScissorTest(true);
+            renderer.render(scene, topCamera);
+
+            // ===== BOTTOM VIEWPORT: 360° panorama =====
+            // Update panorama rotation based on player yaw
+            cylinderMesh.material.uniforms.playerYaw.value = player.rotation.yaw;
+
+            renderer.setViewport(0, 0, width, halfHeight + overlap);
+            renderer.setScissor(0, 0, width, halfHeight + overlap);
+            renderer.setScissorTest(true);
+            renderer.render(cylinderScene, cylinderCamera);
+
+            // Disable scissor test
+            renderer.setScissorTest(false);
+        }
+
+        // ========================================
+        // Initialize and Start
+        // ========================================
+
+        initScene();
+        initInput();
+        onWindowResize(); // Set initial viewport sizes
+        animate();
+
+    </script>
+</body>
+</html>
