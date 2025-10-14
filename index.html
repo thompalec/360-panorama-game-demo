@@ -488,10 +488,10 @@
                 player.velocity.sub(forward);
             }
             if (keys['KeyA']) {
-                player.velocity.sub(right);
+                player.velocity.add(right);
             }
             if (keys['KeyD']) {
-                player.velocity.add(right);
+                player.velocity.sub(right);
             }
 
             // Normalize and apply movement
