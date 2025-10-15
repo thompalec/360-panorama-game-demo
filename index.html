@@ -210,10 +210,12 @@
                 // Side windows
                 const window3 = new THREE.Mesh(windowGeo, windowMat);
                 window3.position.set(size / 2 + 0.01, baseHeight * 0.6, 0);
+                window3.rotation.y = Math.PI / 2; // Rotate 90° to align with side wall
                 house.add(window3);
 
                 const window4 = new THREE.Mesh(windowGeo, windowMat);
                 window4.position.set(-size / 2 - 0.01, baseHeight * 0.6, 0);
+                window4.rotation.y = Math.PI / 2; // Rotate 90° to align with side wall
                 house.add(window4);
 
                 // Roof (pyramid)
