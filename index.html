@@ -358,6 +358,7 @@
 
             // Cylinder scene and camera for panorama display
             cylinderScene = new THREE.Scene();
+            cylinderScene.background = new THREE.Color(0xa8daff); // Match main scene sky
             cylinderCamera = new THREE.OrthographicCamera(-4, 4, 1, -1, 0.1, 10);
             cylinderCamera.position.z = 1;
 
@@ -613,27 +614,25 @@
             }
             framesSinceLastCubemapUpdate++;
 
-            // Clear the entire canvas
-            renderer.clear();
-
             // ===== TOP VIEWPORT: Standard first-person view =====
             const width = window.innerWidth;
             const height = window.innerHeight;
             const halfHeight = Math.floor(height / 2);
-            const overlap = 10; // Small overlap to prevent flickering line
 
             renderer.setViewport(0, halfHeight, width, height - halfHeight);
             renderer.setScissor(0, halfHeight, width, height - halfHeight);
             renderer.setScissorTest(true);
+            renderer.clear();  // Clear only this viewport
             renderer.render(scene, topCamera);
 
             // ===== BOTTOM VIEWPORT: 360° panorama =====
             // Update panorama rotation based on player yaw
             cylinderMesh.material.uniforms.playerYaw.value = player.rotation.yaw;
 
-            renderer.setViewport(0, 0, width, halfHeight + overlap);
-            renderer.setScissor(0, 0, width, halfHeight + overlap);
+            renderer.setViewport(0, 0, width, halfHeight);
+            renderer.setScissor(0, 0, width, halfHeight);
             renderer.setScissorTest(true);
+            renderer.clear();  // Clear only this viewport
             renderer.render(cylinderScene, cylinderCamera);
 
             // Disable scissor test
